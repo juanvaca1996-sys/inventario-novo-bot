@@ -1,7 +1,7 @@
 const http = require("http");
 const https = require("https");
 
-const TELEGRAM_TOKEN = "8474626291:AAHStCYEfsDn9DbRh2YGK4-00hlyoF7_cRs";
+const TELEGRAM_TOKEN = "8474626291:AAHStCYEfsDn9DbRh2YGK4-OOhlyoF7_cRs";
 const FIREBASE_PROJECT = "inventario---novo";
 const API_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
