@@ -87,6 +87,22 @@ async function fsQuery(col, filters = []) {
   });
 }
 
+async function fsDelete(col, id) {
+  return new Promise((resolve) => {
+    const req = https.request(
+      `${FIRESTORE_BASE}/${col}/${id}?key=${FIREBASE_API_KEY}`,
+      { method: "DELETE" },
+      res => { res.on("data", () => {}); res.on("end", resolve); }
+    );
+    req.end();
+  });
+}
+
+async function fsDeleteMovimientos(productId) {
+  const mvs = await fsQuery("movimientos", [{ field: "productId", value: productId }]);
+  for (const m of mvs) await fsDelete("movimientos", m.id);
+}
+
 async function fsAdd(col, data) {
   const fields = {};
   for (const [k, v] of Object.entries(data)) {
@@ -417,6 +433,11 @@ async function registrarRetorno(chatId, codigo, sedeOrigen, qty) {
         event: "Retorno a Bogotá", notes: "Desde Telegram",
         sede: sedeOrigen, sedeDest: "Bogotá", userName: "Admin (bot)",
       });
+      // Si queda en 0, eliminar de la sede
+      if (qtyReal >= stockOrigen) {
+        await fsDeleteMovimientos(enOrigen[0].id);
+        await fsDelete("productos", enOrigen[0].id);
+      }
     }
   }
 
@@ -589,6 +610,12 @@ async function processMessage(chatId, text, userName) {
           event: "Retorno masivo a Bogotá", notes: "Desde Telegram",
           sede: sedeOrigen, sedeDest: "Bogotá", userName: "Admin (bot)",
         });
+        // Si queda en 0, eliminar producto de sede origen
+        const nuevoStock = stockOrigen - 1;
+        if (nuevoStock <= 0) {
+          await fsDelete("productos", enOrigen[0].id);
+          await fsDeleteMovimientos(enOrigen[0].id);
+        }
       }
 
       // Entrada en Bogotá
