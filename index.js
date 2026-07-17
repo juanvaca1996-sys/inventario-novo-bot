@@ -122,7 +122,7 @@ async function showMainMenu(chatId, name) {
        { text: "📊 Resumen", callback_data: "menu_resumen" }],
       [{ text: "🏙️ Ver sede", callback_data: "menu_sede" },
        { text: "⚠️ Alertas", callback_data: "menu_alertas" }],
-      [{ text: "⬇️ Registrar entrada", callback_data: "menu_entrada" },
+      [{ text: "↩️ Retorno a bodega", callback_data: "menu_retorno" },
        { text: "⬆️ Registrar salida", callback_data: "menu_salida" }],
       [{ text: "🌐 Abrir app web", url: "https://inventario---novo.web.app" }]
     ]
@@ -319,7 +319,7 @@ async function registrarEntrada(chatId, codigo, qty, evento) {
   );
 }
 
-// ── SALIDA ──
+// ── SALIDA (con transferencia a sede destino) ──
 async function registrarSalida(chatId, codigo, qty, destino) {
   const prods = await fsQuery("productos", [{ field: "sede", value: "Bogotá" }, { field: "barcode", value: codigo }]);
   if (!prods.length) {
@@ -337,20 +337,105 @@ async function registrarSalida(chatId, codigo, qty, destino) {
         { text: "🏠 Menú", callback_data: "menu_inicio" }]]
     );
   }
+
+  // 1. Registrar salida en Bogotá
   await fsAdd("movimientos", {
     productId: p.id, type: "salida", qty: String(qty),
     event: destino || "", notes: "Desde Telegram",
     sede: "Bogotá", sedeDest: destino || "", userName: "Admin (bot)",
   });
+
+  // 2. Si hay sede destino, crear/actualizar producto allá
+  const SEDES_VALIDAS = ["Tenjo","Cali","Medellín","Villamaría","Soledad"];
+  if (destino && SEDES_VALIDAS.includes(destino)) {
+    const enDest = await fsQuery("productos", [{ field: "sede", value: destino }, { field: "barcode", value: codigo }]);
+    if (enDest.length) {
+      // Ya existe — solo registrar entrada
+      await fsAdd("movimientos", {
+        productId: enDest[0].id, type: "entrada", qty: String(qty),
+        event: "Transferencia desde Bogotá", notes: "Desde Telegram",
+        sede: destino, userName: "Admin (bot)",
+      });
+    } else {
+      // Crear producto en sede destino con initialStock 0
+      const newProdResp = await fsAdd("productos", {
+        name: p.name, category: p.category || "", barcode: p.barcode,
+        sede: destino, initialStock: "0", minStock: p.minStock || "1",
+        photo: p.photo || "", location: p.location || "",
+        notes: `Transferido desde Bogotá`,
+        esLote: p.esLote || "", loteId: p.loteId || "",
+      });
+      // Extraer ID del nuevo producto
+      const newId = newProdResp.name ? newProdResp.name.split("/").pop() : null;
+      if (newId) {
+        await fsAdd("movimientos", {
+          productId: newId, type: "entrada", qty: String(qty),
+          event: "Transferencia desde Bogotá", notes: "Desde Telegram",
+          sede: destino, userName: "Admin (bot)",
+        });
+      }
+    }
+  }
+
   const nuevoStock = await calcStock(p.id, p.initialStock);
   return sendMenu(chatId,
     `✅ <b>Salida registrada</b>\n━━━━━━━━━━━━━━━━━━━━\n\n` +
     `📦 ${p.name}\n` +
     `📟 <code>${p.barcode}</code>\n` +
     `⬆️ Cantidad: <b>-${qty} u.</b>\n` +
-    `${destino ? "📍 Destino: " + destino + "\n" : ""}` +
-    `📊 Stock restante: <b>${nuevoStock} u.</b>`,
+    `${destino ? "📍 Destino: <b>" + destino + "</b>\n" : ""}` +
+    `📊 Stock restante en Bogotá: <b>${nuevoStock} u.</b>`,
     [[{ text: "⬆️ Otra salida", callback_data: "menu_salida" },
+      { text: "🏠 Menú", callback_data: "menu_inicio" }]]
+  );
+}
+
+// ── RETORNO A BODEGA ──
+async function registrarRetorno(chatId, codigo, sedeOrigen, qty) {
+  // Buscar en sede origen
+  const enOrigen = await fsQuery("productos", [{ field: "sede", value: sedeOrigen }, { field: "barcode", value: codigo }]);
+  // Buscar en Bogotá
+  const enBogota = await fsQuery("productos", [{ field: "sede", value: "Bogotá" }, { field: "barcode", value: codigo }]);
+
+  if (!enOrigen.length && !enBogota.length) {
+    return sendMenu(chatId, `❌ Código <code>${codigo}</code> no encontrado.`,
+      [[{ text: "🏠 Menú", callback_data: "menu_inicio" }]]
+    );
+  }
+
+  const nombre = enBogota.length ? enBogota[0].name : enOrigen.length ? enOrigen[0].name : codigo;
+
+  // Salida de sede origen
+  if (enOrigen.length) {
+    const stockOrigen = await calcStock(enOrigen[0].id, enOrigen[0].initialStock);
+    const qtyReal = Math.min(qty, stockOrigen);
+    if (qtyReal > 0) {
+      await fsAdd("movimientos", {
+        productId: enOrigen[0].id, type: "salida", qty: String(qtyReal),
+        event: "Retorno a Bogotá", notes: "Desde Telegram",
+        sede: sedeOrigen, sedeDest: "Bogotá", userName: "Admin (bot)",
+      });
+    }
+  }
+
+  // Entrada en Bogotá
+  if (enBogota.length) {
+    await fsAdd("movimientos", {
+      productId: enBogota[0].id, type: "entrada", qty: String(qty),
+      event: `Retorno desde ${sedeOrigen}`, notes: "Desde Telegram",
+      sede: "Bogotá", userName: "Admin (bot)",
+    });
+  }
+
+  const nuevoStockBogota = enBogota.length ? await calcStock(enBogota[0].id, enBogota[0].initialStock) : qty;
+  return sendMenu(chatId,
+    `✅ <b>Retorno registrado</b>\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📦 ${nombre}\n` +
+    `📟 <code>${codigo}</code>\n` +
+    `↩️ Retornó desde <b>${sedeOrigen}</b>\n` +
+    `Cantidad: <b>${qty} u.</b>\n` +
+    `📊 Stock Bogotá: <b>${nuevoStockBogota} u.</b>`,
+    [[{ text: "↩️ Otro retorno", callback_data: "menu_retorno" },
       { text: "🏠 Menú", callback_data: "menu_inicio" }]]
   );
 }
@@ -370,10 +455,10 @@ async function processCallback(chatId, data, messageId, userName) {
     );
   }
 
-  if (data === "menu_entrada") {
-    userState[chatId] = { action: "entrada_codigo" };
+  if (data === "menu_retorno") {
+    userState[chatId] = { action: "retorno_codigo" };
     return sendMenu(chatId,
-      "⬇️ <b>Registrar Entrada</b>\n\nEscribe el <b>código de barras</b> del producto:\n<i>Ejemplo: NOVO00001</i>",
+      "↩️ <b>Retorno a bodega Bogotá</b>\n\nEscribe el <b>código de barras</b> del producto que retorna:\n<i>Ejemplo: NOVO00001</i>",
       [[{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
     );
   }
@@ -418,33 +503,25 @@ async function processMessage(chatId, text, userName) {
   }
 
   // ── ENTRADA ──
-  if (state.action === "entrada_codigo") {
-    userState[chatId] = { action: "entrada_qty", codigo: msg };
+  // ── RETORNO A BODEGA ──
+  if (state.action === "retorno_codigo") {
+    userState[chatId] = { action: "retorno_sede", codigo: msg };
     return sendMenu(chatId,
-      `📟 Código: <code>${msg}</code>\n\n⬇️ ¿Cuántas unidades entran?`,
-      [[{ text: "1️⃣ 1 u.", callback_data: `eq_1_${msg}` },
-        { text: "2️⃣ 2 u.", callback_data: `eq_2_${msg}` },
-        { text: "5️⃣ 5 u.", callback_data: `eq_5_${msg}` }],
-       [{ text: "🔟 10 u.", callback_data: `eq_10_${msg}` },
-        { text: "✏️ Otra cantidad", callback_data: `eq_custom_${msg}` }],
+      `↩️ Código: <code>${msg}</code>\n\n🏙️ ¿Desde qué sede retorna?`,
+      [[{ text: "📦 Tenjo", callback_data: `rs_Tenjo_${msg}` },
+        { text: "📦 Cali", callback_data: `rs_Cali_${msg}` }],
+       [{ text: "📦 Medellín", callback_data: `rs_Medellín_${msg}` },
+        { text: "📦 Villamaría", callback_data: `rs_Villamaría_${msg}` }],
+       [{ text: "📦 Soledad", callback_data: `rs_Soledad_${msg}` }],
        [{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
     );
   }
 
-  if (state.action === "entrada_qty_custom") {
+  if (state.action === "retorno_qty_custom") {
     const qty = parseInt(msg);
     if (!qty || qty <= 0) return send(chatId, "❌ Cantidad inválida. Escribe un número.");
-    userState[chatId] = { action: "entrada_evento", codigo: state.codigo, qty };
-    return sendMenu(chatId,
-      `⬇️ Entrada de <b>${qty} u.</b>\n\n📅 ¿A qué evento corresponde? (o salta)`,
-      [[{ text: "⏭️ Sin evento", callback_data: `ee_skip_${state.codigo}_${qty}` }],
-       [{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
-    );
-  }
-
-  if (state.action === "entrada_evento") {
     userState[chatId] = { action: "menu" };
-    return registrarEntrada(chatId, state.codigo, state.qty, msg);
+    return registrarRetorno(chatId, state.codigo, state.sedeorigen, qty);
   }
 
   // ── SALIDA ──
@@ -483,6 +560,69 @@ async function processMessage(chatId, text, userName) {
   }
 
   // Agregar solo desde app web
+
+  // ── SALIDA MASIVA ──
+  if (state.action === "salida_masiva_codigos") {
+    const sedeDest = state.sedeDest;
+    // Parse codes - split by newline or comma
+    const codigos = msg.split(/[\n,]/).map(c => c.trim().toUpperCase()).filter(c => c.length > 0);
+    if (!codigos.length) return send(chatId, "❌ No encontré códigos. Inténtalo de nuevo.");
+
+    await send(chatId, `⏳ Procesando <b>${codigos.length} código(s)</b> hacia <b>${sedeDest}</b>...`);
+
+    let exitosos = [], fallidos = [], sinStock = [];
+    for (const codigo of codigos) {
+      const prods = await fsQuery("productos", [{ field: "sede", value: "Bogotá" }, { field: "barcode", value: codigo }]);
+      if (!prods.length) { fallidos.push(codigo); continue; }
+      const p = prods[0];
+      const stock = await calcStock(p.id, p.initialStock);
+      if (stock <= 0) { sinStock.push(`${codigo} (${p.name})`); continue; }
+
+      // Salida de Bogotá
+      await fsAdd("movimientos", {
+        productId: p.id, type: "salida", qty: "1",
+        event: sedeDest, notes: "Salida masiva desde Telegram",
+        sede: "Bogotá", sedeDest, userName: "Admin (bot)",
+      });
+
+      // Crear/actualizar en sede destino
+      const enDest = await fsQuery("productos", [{ field: "sede", value: sedeDest }, { field: "barcode", value: codigo }]);
+      if (enDest.length) {
+        await fsAdd("movimientos", {
+          productId: enDest[0].id, type: "entrada", qty: "1",
+          event: "Transferencia masiva desde Bogotá", notes: "Desde Telegram",
+          sede: sedeDest, userName: "Admin (bot)",
+        });
+      } else {
+        const newProd = await fsAdd("productos", {
+          name: p.name, category: p.category || "", barcode: p.barcode,
+          sede: sedeDest, initialStock: "0", minStock: p.minStock || "1",
+          photo: p.photo || "", location: "", notes: "Transferencia masiva desde Telegram",
+          esLote: p.esLote || "", loteId: p.loteId || "",
+        });
+        const newId = newProd.name ? newProd.name.split("/").pop() : null;
+        if (newId) {
+          await fsAdd("movimientos", {
+            productId: newId, type: "entrada", qty: "1",
+            event: "Transferencia masiva desde Bogotá", notes: "Desde Telegram",
+            sede: sedeDest, userName: "Admin (bot)",
+          });
+        }
+      }
+      exitosos.push(`${codigo} (${p.name})`);
+    }
+
+    userState[chatId] = { action: "menu" };
+    let resp = `✅ <b>Salida masiva → ${sedeDest}</b>\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    if (exitosos.length) resp += `✅ <b>Procesados (${exitosos.length}):</b>\n` + exitosos.map(c=>`  • ${c}`).join("\n") + "\n\n";
+    if (sinStock.length) resp += `🟡 <b>Sin stock (${sinStock.length}):</b>\n` + sinStock.map(c=>`  • ${c}`).join("\n") + "\n\n";
+    if (fallidos.length) resp += `❌ <b>No encontrados (${fallidos.length}):</b>\n` + fallidos.map(c=>`  • ${c}`).join("\n");
+
+    return sendMenu(chatId, resp,
+      [[{ text: "📦 Nueva salida masiva", callback_data: "menu_salida_masiva" },
+        { text: "🏠 Menú", callback_data: "menu_inicio" }]]
+    );
+  }
 
   return showMainMenu(chatId, userName);
 }
@@ -538,6 +678,63 @@ async function processCallbackData(chatId, data, userName) {
        [{ text: "📦 Soledad", callback_data: `sd_Soledad_${codigo}_${qty}` },
         { text: "✏️ Otro destino", callback_data: `sd_custom_${codigo}_${qty}` }],
        [{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
+    );
+  }
+
+  // Retorno sede: rs_SEDE_CODIGO
+  if (data.startsWith("rs_")) {
+    const partes = data.replace("rs_", "").split("_");
+    const codigo = partes.slice(1).join("_");
+    const sedeOrigen = partes[0];
+    userState[chatId] = { action: "retorno_qty", codigo, sedeOrigen };
+    return sendMenu(chatId,
+      `↩️ Retorno desde <b>${sedeOrigen}</b>\n📟 <code>${codigo}</code>\n\n¿Cuántas unidades retornan?`,
+      [[{ text: "1️⃣ 1 u.", callback_data: `rq_1_${sedeOrigen}_${codigo}` },
+        { text: "2️⃣ 2 u.", callback_data: `rq_2_${sedeOrigen}_${codigo}` },
+        { text: "5️⃣ 5 u.", callback_data: `rq_5_${sedeOrigen}_${codigo}` }],
+       [{ text: "🔟 10 u.", callback_data: `rq_10_${sedeOrigen}_${codigo}` },
+        { text: "✏️ Otra cantidad", callback_data: `rq_custom_${sedeOrigen}_${codigo}` }],
+       [{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
+    );
+  }
+
+  // Cantidad retorno: rq_N_SEDE_CODIGO
+  if (data.startsWith("rq_")) {
+    const partes = data.replace("rq_", "").split("_");
+    const qty = partes[0];
+    const sedeOrigen = partes[1];
+    const codigo = partes.slice(2).join("_");
+    if (qty === "custom") {
+      userState[chatId] = { action: "retorno_qty_custom", codigo, sedeOrigen };
+      return sendMenu(chatId, `✏️ Escribe la cantidad que retorna:`,
+        [[{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
+      );
+    }
+    userState[chatId] = { action: "menu" };
+    return registrarRetorno(chatId, codigo, sedeOrigen, parseInt(qty));
+  }
+
+  // Salida masiva
+  if (data === "menu_salida_masiva") {
+    userState[chatId] = { action: "salida_masiva_sede" };
+    return sendMenu(chatId,
+      "📦 <b>Salida masiva</b>\n\n¿A qué sede van todos los productos?",
+      [[{ text: "📦 Tenjo", callback_data: "sm_Tenjo" },
+        { text: "📦 Cali", callback_data: "sm_Cali" }],
+       [{ text: "📦 Medellín", callback_data: "sm_Medellín" },
+        { text: "📦 Villamaría", callback_data: "sm_Villamaría" }],
+       [{ text: "📦 Soledad", callback_data: "sm_Soledad" }],
+       [{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
+    );
+  }
+
+  // Sede salida masiva
+  if (data.startsWith("sm_")) {
+    const sede = data.replace("sm_", "");
+    userState[chatId] = { action: "salida_masiva_codigos", sedeDest: sede, codigos: [] };
+    return sendMenu(chatId,
+      `📦 <b>Salida masiva → ${sede}</b>\n\nEscribe los códigos uno por línea o separados por coma:\n\n<i>Ejemplo:\nNOVO00001\nNOVO00002\nNOVO00003</i>\n\nO: <code>NOVO00001, NOVO00002, NOVO00003</code>`,
+      [[{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
     );
   }
 
