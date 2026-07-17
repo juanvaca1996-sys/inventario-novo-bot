@@ -566,8 +566,7 @@ async function processMessage(chatId, text, userName) {
   // ── RETORNO MASIVO ──
   if (state.action === "retorno_masivo_codigos") {
     const sedeOrigen = state.sedeOrigen;
-    const codigos = msg.split(/[
-,]/).map(c => c.trim().toUpperCase()).filter(c => c.length > 0);
+    const codigos = msg.split(/[\n,\r]+/).map(c => c.trim().toUpperCase()).filter(c => c.length > 0);
     if (!codigos.length) return send(chatId, "❌ No encontré códigos. Inténtalo de nuevo.");
 
     await send(chatId, `⏳ Procesando retorno de <b>${codigos.length} código(s)</b> desde <b>${sedeOrigen}</b>...`);
@@ -619,7 +618,7 @@ async function processMessage(chatId, text, userName) {
   if (state.action === "salida_masiva_codigos") {
     const sedeDest = state.sedeDest;
     // Parse codes - split by newline or comma
-    const codigos = msg.split(/[\n,]/).map(c => c.trim().toUpperCase()).filter(c => c.length > 0);
+    const codigos = msg.split(/[\n,\r]+/).map(c => c.trim().toUpperCase()).filter(c => c.length > 0);
     if (!codigos.length) return send(chatId, "❌ No encontré códigos. Inténtalo de nuevo.");
 
     await send(chatId, `⏳ Procesando <b>${codigos.length} código(s)</b> hacia <b>${sedeDest}</b>...`);
