@@ -122,8 +122,10 @@ async function showMainMenu(chatId, name) {
        { text: "📊 Resumen", callback_data: "menu_resumen" }],
       [{ text: "🏙️ Ver sede", callback_data: "menu_sede" },
        { text: "⚠️ Alertas", callback_data: "menu_alertas" }],
-      [{ text: "↩️ Retorno a bodega", callback_data: "menu_retorno" },
-       { text: "⬆️ Registrar salida", callback_data: "menu_salida" }],
+      [{ text: "⬆️ Salida individual", callback_data: "menu_salida" },
+       { text: "📦 Salida masiva", callback_data: "menu_salida_masiva" }],
+      [{ text: "↩️ Retorno individual", callback_data: "menu_retorno" },
+       { text: "↩️📦 Retorno masivo", callback_data: "menu_retorno_masivo" }],
       [{ text: "🌐 Abrir app web", url: "https://inventario---novo.web.app" }]
     ]
   );
@@ -561,6 +563,58 @@ async function processMessage(chatId, text, userName) {
 
   // Agregar solo desde app web
 
+  // ── RETORNO MASIVO ──
+  if (state.action === "retorno_masivo_codigos") {
+    const sedeOrigen = state.sedeOrigen;
+    const codigos = msg.split(/[
+,]/).map(c => c.trim().toUpperCase()).filter(c => c.length > 0);
+    if (!codigos.length) return send(chatId, "❌ No encontré códigos. Inténtalo de nuevo.");
+
+    await send(chatId, `⏳ Procesando retorno de <b>${codigos.length} código(s)</b> desde <b>${sedeOrigen}</b>...`);
+
+    let exitosos = [], fallidos = [], sinStock = [];
+    for (const codigo of codigos) {
+      const enOrigen = await fsQuery("productos", [{ field: "sede", value: sedeOrigen }, { field: "barcode", value: codigo }]);
+      const enBogota = await fsQuery("productos", [{ field: "sede", value: "Bogotá" }, { field: "barcode", value: codigo }]);
+
+      if (!enOrigen.length && !enBogota.length) { fallidos.push(codigo); continue; }
+
+      const nombre = enBogota.length ? enBogota[0].name : enOrigen.length ? enOrigen[0].name : codigo;
+
+      // Salida de sede origen
+      if (enOrigen.length) {
+        const stockOrigen = await calcStock(enOrigen[0].id, enOrigen[0].initialStock);
+        if (stockOrigen <= 0) { sinStock.push(`${codigo} (${nombre})`); continue; }
+        await fsAdd("movimientos", {
+          productId: enOrigen[0].id, type: "salida", qty: "1",
+          event: "Retorno masivo a Bogotá", notes: "Desde Telegram",
+          sede: sedeOrigen, sedeDest: "Bogotá", userName: "Admin (bot)",
+        });
+      }
+
+      // Entrada en Bogotá
+      if (enBogota.length) {
+        await fsAdd("movimientos", {
+          productId: enBogota[0].id, type: "entrada", qty: "1",
+          event: `Retorno masivo desde ${sedeOrigen}`, notes: "Desde Telegram",
+          sede: "Bogotá", userName: "Admin (bot)",
+        });
+      }
+      exitosos.push(`${codigo} (${nombre})`);
+    }
+
+    userState[chatId] = { action: "menu" };
+    let resp = `✅ <b>Retorno masivo desde ${sedeOrigen}</b>\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    if (exitosos.length) resp += `✅ <b>Retornados (${exitosos.length}):</b>\n` + exitosos.map(c=>`  • ${c}`).join("\n") + "\n\n";
+    if (sinStock.length) resp += `🟡 <b>Sin stock en ${sedeOrigen} (${sinStock.length}):</b>\n` + sinStock.map(c=>`  • ${c}`).join("\n") + "\n\n";
+    if (fallidos.length) resp += `❌ <b>No encontrados (${fallidos.length}):</b>\n` + fallidos.map(c=>`  • ${c}`).join("\n");
+
+    return sendMenu(chatId, resp,
+      [[{ text: "↩️📦 Nuevo retorno masivo", callback_data: "menu_retorno_masivo" },
+        { text: "🏠 Menú", callback_data: "menu_inicio" }]]
+    );
+  }
+
   // ── SALIDA MASIVA ──
   if (state.action === "salida_masiva_codigos") {
     const sedeDest = state.sedeDest;
@@ -712,6 +766,30 @@ async function processCallbackData(chatId, data, userName) {
     }
     userState[chatId] = { action: "menu" };
     return registrarRetorno(chatId, codigo, sedeOrigen, parseInt(qty));
+  }
+
+  // Retorno masivo
+  if (data === "menu_retorno_masivo") {
+    userState[chatId] = { action: "retorno_masivo_sede" };
+    return sendMenu(chatId,
+      "↩️📦 <b>Retorno masivo a Bogotá</b>\n\n¿Desde qué sede regresan los productos?",
+      [[{ text: "📦 Tenjo", callback_data: "rm_Tenjo" },
+        { text: "📦 Cali", callback_data: "rm_Cali" }],
+       [{ text: "📦 Medellín", callback_data: "rm_Medellín" },
+        { text: "📦 Villamaría", callback_data: "rm_Villamaría" }],
+       [{ text: "📦 Soledad", callback_data: "rm_Soledad" }],
+       [{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
+    );
+  }
+
+  // Sede retorno masivo
+  if (data.startsWith("rm_")) {
+    const sedeOrigen = data.replace("rm_", "");
+    userState[chatId] = { action: "retorno_masivo_codigos", sedeOrigen };
+    return sendMenu(chatId,
+      `↩️📦 <b>Retorno masivo desde ${sedeOrigen}</b>\n\nEscribe los códigos uno por línea o separados por coma:\n\n<i>Ejemplo:\nNOVO00001\nNOVO00002\nNOVO00003</i>`,
+      [[{ text: "❌ Cancelar", callback_data: "menu_inicio" }]]
+    );
   }
 
   // Salida masiva
